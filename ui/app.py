@@ -19,6 +19,22 @@ from src.processing import read_excel_multiblock, detect_columns, normalize_time
 st.set_page_config(page_title="Honeywell Flight Scheduling Optimizer (HFSO)", layout="wide")
 st.title("Honeywell Flight Scheduling Optimizer (HFSO)")
 
+with st.expander("ℹ️ Quick glossary (tap to learn the terms)"):
+    st.markdown("""
+- **Slot / Window**: a fixed time bucket (RLI uses **5-min**; busiest/best use **15–30-min**).
+- **Movements**: number of departures/arrivals in a slot.
+- **RLI (Runway Load Index)** = `movements / (capacity × weather_factor)`. **> 1.0** means overload.
+- **Ops perspective**: map historical times onto **today** for live planning. Turn **OFF** to analyze actual past dates.
+- **Per-window capacity (5-min)**: max movements a runway can handle each 5-min slot.
+- **Weather factor**: capacity multiplier; **0.8** ≈ bad weather (−20%); **1.2** ≈ good (+20%).
+- **Max shift (min)**: largest time move the tuner will apply to a flight (e.g., ±15 min).
+- **Flights shifted**: unique flights the tuner moved.
+- **Est. delay saved (min)**: total departure delay minutes reduced after applying shifts.
+- **Efficiency (Saved / Shifted)**: delay saved per minute of total shifting.
+- **Cascading flights**: flights whose delays propagate via tight turnarounds / same-slot neighbors.
+""")
+
+
 # ============================== Data loaders ==============================
 @st.cache_data(show_spinner=True)
 def load_df_cached_from_parquet(parquet_path: str = "data/processed.parquet"):
@@ -178,10 +194,12 @@ df = df.loc[mask_date].copy()
 # ============================== Capacity & Weather ==============================
 st.sidebar.header("Capacity & Weather")
 ops_per_window_capacity = st.sidebar.number_input(
-    "Runway capacity per 5-min window", min_value=4, value=12, step=1
+    "Runway capacity per 5-min window", min_value=4, value=12, step=1,
+    help="Max movements the runway can safely handle in each 5-min slot under normal conditions."
 )
 weather_factor = st.sidebar.slider(
-    "Weather factor (↓ capacity)", min_value=0.5, max_value=1.5, value=1.0, step=0.05
+    "Weather factor (↓ capacity)", min_value=0.5, max_value=1.5, value=1.0, step=0.05,
+    help="Multiplier on effective capacity. 0.8 ≈ bad weather (20% less), 1.2 ≈ good (20% more)."
 )
 
 # ============================== Airport + Ops toggle (TOP) ==============================
@@ -667,6 +685,7 @@ with tab_nlp:
 # ---------------- Analytics tab ----------------
 with tab_analytics:
     st.subheader("Busiest Slots (view)")
+    st.caption("Top 15-min slots by total movements in the current view (ops perspective if ON).")
     try:
         busiest_tbl = busiest_slots(df_view, time_col="sched_dep", window_min=15, top_n=20)
         st.dataframe(busiest_tbl, use_container_width=True)
@@ -674,6 +693,7 @@ with tab_analytics:
         st.error(f"Failed to compute busiest slots: {e}")
 
     st.subheader("Best Time to Operate (actual schedule)")
+    st.caption("30-min windows with the lowest average delays (choose Arrival or Departure).")
     kind_sel = st.selectbox("Arrival or Departure?", ["arrival", "departure"], index=1, key="best_kind")
     try:
         best_tbl = best_time_to_operate(df_ap, at_airport=None, kind=kind_sel, window_min=30)
@@ -682,6 +702,7 @@ with tab_analytics:
         st.error(f"Failed to compute best-time windows: {e}")
 
     st.subheader("Runway Load Index (RLI) — view")
+    st.caption("RLI = movements / (capacity × weather). RLI > 1.0 indicates overload risk.")
     try:
         rli_tbl = runway_load_index(
             df_view["sched_dep"], window_min=5,
@@ -693,6 +714,7 @@ with tab_analytics:
         st.error(f"Failed to compute RLI: {e}")
 
     st.subheader("Congestion Heatmap (view)")
+    st.caption("RLI by hour (x) and date (y). Darker = more congested.")
     def rli_heatmap(df_ap_like, cap, weather, window_min=5):
         rli = runway_load_index(df_ap_like["sched_dep"], window_min, weather, cap)
         if rli.empty:
@@ -720,6 +742,7 @@ with tab_analytics:
 
     # NEW: Cascading Impact always visible
     st.subheader("Cascading Impact — Top Flights")
+    st.caption("Flights most likely to propagate delays (tight turns / same-slot neighbors).")
     base_df_for_infl, used_fallback_infl = _ensure_delay_metric(df_ap, int(ops_per_window_capacity))
     infl_tbl = influence_table(base_df_for_infl, base_delay_col="dep_delay_min", steps=3)
     st.dataframe(_present_table_with_label_left(infl_tbl, base_df_for_infl), use_container_width=True)
@@ -732,14 +755,16 @@ with tab_tuner:
 
     c1, c2, c3 = st.columns([1,1,2])
     with c1:
-        cap = st.number_input("Per-window capacity (5-min)", min_value=1, value=int(ops_per_window_capacity), step=1, key="cap_tuner")
+        cap = st.number_input("Per-window capacity (5-min)", min_value=1, value=int(ops_per_window_capacity), step=1, key="cap_tuner",
+                              help="Capacity used by the tuner. Set at/under the runway's safe limit per 5-min slot.")
     with c2:
-        max_shift = st.number_input("Max shift (min)", min_value=5, value=15, step=5, key="shift_tuner")
+        max_shift = st.number_input("Max shift (min)", min_value=5, value=15, step=5, key="shift_tuner",
+                                    help="Largest time move the tuner will apply to a flight (±N minutes).")
     with c3:
         tune_on_view = st.checkbox(
             "Tune using ops perspective (pattern view)",
             value=pattern_view,
-            help="When ON, the tuner runs on the view that maps historical times onto today."
+            help="When ON, tuner runs on the today-anchored view. When OFF, runs on the actual historical schedule."
         )
 
     # pick dataset to tune on
@@ -799,6 +824,8 @@ with tab_tuner:
     k3.metric("Peak Reduction",    f"{peak_drop:.2f}")
     k4.metric("# Flights Shifted", f"{moved_cnt}")
     k5.metric("Est. Total Dep Delay Δ (min)", f"{est_delay_delta:.0f}")
+    st.caption("**Peak Reduction** = Peak RLI Before − After. **Est. Total Dep Delay Δ** = delay minutes saved after shifts.")
+
     if used_fallback_kpi:
         st.caption("KPIs use synthetic congestion-based delays (actual delays sparse/missing).")
 
@@ -820,6 +847,8 @@ with tab_tuner:
     k6.metric("Avg Saved per Moved Flight (min)", f"{avg_saved_per_flight:.1f}")
     k7.metric("Total Minutes Shifted", f"{total_shift_min:.0f}")
     k8.metric("Efficiency (Saved / Shifted)", f"{efficiency_ratio:.2f}")
+    st.caption("**Efficiency (Saved / Shifted)** = delay saved per minute of total shifting across all moved flights.")
+
 
     co = st.columns(2)
     with co[0]:
