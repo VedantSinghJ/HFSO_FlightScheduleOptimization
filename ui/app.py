@@ -228,15 +228,28 @@ def build_airport_options(df_all: pd.DataFrame, top_n: int = 30):
     return out or ["BOM", "DEL"]
 
 # Top controls
+# Top controls
 left, right = st.columns([3, 1])
 with left:
     airports = build_airport_options(df)
     airport = st.selectbox("Focus Airport / City", options=airports, index=0)
+
 with right:
+    # Default ON
     try:
-        pattern_view = st.toggle("Ops perspective", value=False, help="Map historical times onto today for live ops planning.")
+        pattern_view = st.toggle(
+            "Ops perspective",
+            value=True,
+            help="Map historical times onto TODAY for live ops planning."
+        )
     except Exception:
-        pattern_view = st.checkbox("Ops perspective", value=False, help="Map historical times onto today for live ops planning.")
+        pattern_view = st.checkbox(
+            "Ops perspective",
+            value=True,
+            help="Map historical times onto TODAY for live ops planning."
+        )
+    # Short, clear guidance line
+    st.caption("Ops perspective is **ON** by default (history mapped to today). Turn it **OFF** to analyze actual past dates.")
 
 # scope dataset to airport
 mask = _airport_mask_any(df, airport).reindex(df.index, fill_value=False)
@@ -254,6 +267,7 @@ else:
     view_times = base_times
 df_view = df_ap.copy()
 df_view["sched_dep"] = view_times
+
 
 # ============================== Label + table helpers ==============================
 def _safe_str(s: pd.Series) -> pd.Series:
