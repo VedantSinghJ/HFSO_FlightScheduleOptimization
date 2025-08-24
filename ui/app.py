@@ -269,14 +269,45 @@ df_view = df_ap.copy()
 df_view["sched_dep"] = view_times
 
 
+
 # ============================== Label + table helpers ==============================
 def _safe_str(s: pd.Series) -> pd.Series:
-    return s.astype(str).replace({"<NA>": "", "nan": ""}).fillna("").str.strip()
+    """
+    Convert to string, trim, and collapse common null-ish tokens to empty,
+    but only when the WHOLE string is a null token (so 'LONDON' is untouched).
+    """
+    out = s.astype(str).fillna("").str.strip()
+
+    # normalize pandas markers
+    out = out.replace({"<NA>": "", "nan": "", "NaN": ""})
+
+    # collapse textual nulls ONLY if the entire value is a null token
+    # (case-insensitive, anchors so we don't touch substrings)
+    null_full = out.str.match(
+        r"^(?i:(?:none|null|nil|n/?a|n\.?a\.?|na|n-a|—|-))$",
+        na=False
+    )
+    out = out.mask(null_full, "")
+
+    return out
+
 
 def _clean_fno(s: pd.Series) -> pd.Series:
+    """
+    Normalize flight numbers:
+    - remove trailing '.0' from numerics (e.g., '123.0' -> '123')
+    - strip spaces; upper-case
+    - if there are NO digits at all (e.g., 'NONE', 'NA'), treat as missing
+    """
     ss = _safe_str(s)
-    ss = ss.str.replace(r"^(\d+)\.0$", r"\1", regex=True).str.replace(" ", "", regex=False)
-    return ss.str.upper()
+    ss = ss.str.replace(r"^(\d+)\.0$", r"\1", regex=True) \
+           .str.replace(" ", "", regex=False) \
+           .str.upper()
+
+    # Require at least one digit in a valid flight number
+    ss = ss.where(ss.str.contains(r"\d"), "")
+
+    return ss
 
 def _fmt_when(s: pd.Series) -> pd.Series:
     t = pd.to_datetime(s, errors="coerce")
@@ -285,8 +316,12 @@ def _fmt_when(s: pd.Series) -> pd.Series:
 def _compose_label_from_base(df_base: pd.DataFrame) -> pd.Series:
     idx = df_base.index
     carrier = _safe_str(df_base.get("carrier", pd.Series("", index=idx))).str.upper()
+    # If carrier equals a null token like 'NONE', blank it
+    carrier = carrier.where(~carrier.isin(["NONE", "NULL", "N/A", "NA", "-", "—"]), "")
+
     fno_raw = _clean_fno(df_base.get("flight_number", pd.Series("", index=idx)))
     fno = fno_raw.replace("", pd.NA).ffill().fillna("")
+
     origin = _safe_str(df_base.get("origin", pd.Series("", index=idx))).str.upper()
     dest   = _safe_str(df_base.get("destination", pd.Series("", index=idx))).str.upper()
     route = np.where(
