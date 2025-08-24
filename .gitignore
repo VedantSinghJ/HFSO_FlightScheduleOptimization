@@ -3,6 +3,7 @@
 venv/
 env/
 
+.devcontainer
 # Python
 __pycache__/
 *.py[cod]
